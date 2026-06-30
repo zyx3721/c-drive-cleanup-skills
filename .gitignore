@@ -1,0 +1,11 @@
+# Local disk diagnosis reports
+c-drive-report*.json
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# OS/editor metadata
+.DS_Store
+Thumbs.db

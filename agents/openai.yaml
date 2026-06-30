@@ -1,0 +1,4 @@
+interface:
+  display_name: "Windows C Drive Cleanup"
+  short_description: "Safely diagnose and clean Windows C drive space"
+  default_prompt: "Use $c-drive-cleanup-skills to diagnose C drive usage and propose safe cleanup steps."
