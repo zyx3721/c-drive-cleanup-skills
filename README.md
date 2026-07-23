@@ -34,7 +34,7 @@
 ```
 
 - `SKILL.md`：技能入口，定义触发说明、核心规则、工作流和常见动作。
-- `scripts/measure_c_drive.ps1`：只读测量脚本，用于统计卷空间和常见清理候选目录大小。
+- `scripts/measure_c_drive.ps1`：只读测量脚本，支持快速和全面两档 C 盘分析，并输出结构化 JSON 报告。
 - `references/windows-cleanup-safety.md`：清理安全参考，说明哪些动作可批准执行、哪些必须审查、哪些只能用官方工具。
 - `agents/openai.yaml`：Codex/OpenAI agent 展示配置。
 
@@ -50,6 +50,12 @@ git clone https://github.com/<your-name>/c-drive-cleanup-skills.git "$env:USERPR
 
 ## 使用方式
 
+### 管理员前置条件
+
+本技能必须在管理员 PowerShell 或管理员 Codex 会话中使用。首次咨询时，技能会先要求用户确认管理员会话；在得到明确确认前，不会执行扫描。测量脚本也会自行验证管理员身份，非管理员会话会直接停止，防止生成覆盖不完整的全盘报告。
+
+使用前，请以“管理员身份运行”启动 PowerShell 或 Codex。
+
 在 Codex 中提出类似请求即可触发该技能：
 
 ```text
@@ -59,19 +65,25 @@ git clone https://github.com/<your-name>/c-drive-cleanup-skills.git "$env:USERPR
 技能会优先使用只读测量脚本：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -Top 20
+& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -Top 20
 ```
 
-如果需要包含 C 盘顶层目录估算：
+如需整体分析 C 盘顶层目录和用户目录中的大文件：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -Top 20 -IncludeTopLevel
+& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -Top 50 -MinimumLargeDirectoryGB 0.25 -MinimumLargeFileGB 1
 ```
 
 如果需要保存 JSON 报告：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -JsonPath ".\c-drive-report.json"
+& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -JsonPath ".\c-drive-report.json"
+```
+
+如需把 Windows 组件存储的只读 DISM 分析加入报告（通常需管理员终端）：
+
+```powershell
+& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -AnalyzeComponentStore
 ```
 
 ## 测量脚本参数
@@ -79,11 +91,15 @@ git clone https://github.com/<your-name>/c-drive-cleanup-skills.git "$env:USERPR
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
 | `-Drive` | `C:` | 要测量的盘符，格式如 `C:` 或 `D:`。 |
+| `-ScanMode` | `Quick` | `Quick` 扫描常见类别；`Full` 单次遍历所有可访问的 C 盘目录与文件。 |
 | `-Top` | `20` | 输出前 N 个清理候选项或顶层目录。 |
-| `-IncludeTopLevel` | 关闭 | 额外估算目标盘根目录下顶层目录大小，可能耗时较长。 |
+| `-MinimumLargeFileGB` | `1` | 全面模式中列为“大文件”的最小大小（GB）。 |
+| `-MinimumLargeDirectoryGB` | `0.25` | 全面模式中列为“大目录”的最小大小（GB）。 |
+| `-IncludeTopLevel` | 关闭 | 兼容参数；在快速模式下额外统计顶层目录。 |
+| `-AnalyzeComponentStore` | 关闭 | 运行只读的 DISM 组件存储分析；可能需要管理员权限。 |
 | `-JsonPath` | 空 | 写出 JSON 报告，便于清理前后对比。 |
 
-脚本仅执行读取和统计，不会删除文件。
+脚本仅在管理员会话中执行读取和统计，不会删除文件。全面模式单次遍历整个盘符下所有可访问的非重解析目录，输出最大的目录、文件和按风险分类的清理候选项，避免重复递归。它会跳过重解析点，并对无权限或锁定路径记录 `Errors`、最多 10 条 `ErrorSamples` 和 `SkippedReparsePoints`；因此报告是定位依据，可能低估受保护或被锁定路径的实际占用。
 
 ## 清理分级
 
@@ -106,10 +122,10 @@ Get-Content .\README.md
 如果要验证测量脚本语法：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure_c_drive.ps1 -Drive C: -Top 5
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure_c_drive.ps1 -Drive C: -ScanMode Quick -Top 5
 ```
 
-注意：测量真实 C 盘可能耗时，尤其是使用 `-IncludeTopLevel` 时。
+注意：测量真实 C 盘可能耗时，尤其是使用 `-ScanMode Full` 时。`WinSxS` 可回收空间、系统还原点、已安装应用和 Docker/WSL 数据仍应通过对应官方工具进一步分析。
 
 ## 发布到 GitHub 前检查
 

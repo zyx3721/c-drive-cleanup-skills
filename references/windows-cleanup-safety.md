@@ -23,6 +23,7 @@
 - `.zip`、`.7z`、`.rar`、`.iso`、`.msi`、`.exe`、`.dmg`、`.vhd`、`.vhdx`、`.qcow2`、`.bak`、`.old`、`.log` 文件。
 - Docker 镜像、WSL 发行版、虚拟机目录、游戏库、IDE 索引、构建产物、包缓存和源码仓库。
 - OneDrive、Dropbox、Google Drive、iCloud Drive 等云同步目录。
+- 浏览器的完整用户配置文件、`AppData\\Local\\Packages`、开发工具缓存和任意扫描报告中带有访问错误的目录。目录大小只能用于定位，不能直接授权删除。
 
 ## 只用官方工具
 
@@ -32,6 +33,7 @@
 - `pagefile.sys`：除非和用户一起排查问题，否则不要修改。
 - 驱动存储：使用官方驱动清理或设备管理工具。
 - 已安装应用和游戏：使用卸载器、设置、`winget uninstall` 或启动器自带工具。
+- Docker、WSL 和虚拟机：使用对应产品的磁盘用量与清理命令。`.vhdx`、卷和镜像可能包含唯一数据。
 
 ## 避免手动删除
 
