@@ -52,9 +52,9 @@ git clone https://github.com/<your-name>/c-drive-cleanup-skills.git "$env:USERPR
 
 ### 管理员前置条件
 
-本技能必须在管理员 PowerShell 或管理员 Codex 会话中使用。首次咨询时，技能会先要求用户确认管理员会话；在得到明确确认前，不会执行扫描。测量脚本也会自行验证管理员身份，非管理员会话会直接停止，防止生成覆盖不完整的全盘报告。
+首次咨询时，技能会自动进行只读管理员权限预检。若当前会话不是管理员，可使用 `-ElevateIfNeeded` 自动发起 Windows UAC；只有用户在 UAC 中批准后，独立的管理员 PowerShell 才会执行扫描。该机制不能绕过或代替用户确认 UAC。
 
-使用前，请以“管理员身份运行”启动 PowerShell 或 Codex。
+管理员会话可直接执行扫描；非管理员会话建议使用下方的 `-ElevateIfNeeded`，扫描结果会自动写入 JSON 文件供原会话读取。
 
 在 Codex 中提出类似请求即可触发该技能：
 
@@ -65,7 +65,7 @@ git clone https://github.com/<your-name>/c-drive-cleanup-skills.git "$env:USERPR
 技能会优先使用只读测量脚本：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -Top 20
+& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -Top 20 -ElevateIfNeeded
 ```
 
 如需整体分析 C 盘顶层目录和用户目录中的大文件：
@@ -77,13 +77,13 @@ git clone https://github.com/<your-name>/c-drive-cleanup-skills.git "$env:USERPR
 如果需要保存 JSON 报告：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -JsonPath ".\c-drive-report.json"
+& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -ElevateIfNeeded -JsonPath ".\c-drive-report.json"
 ```
 
 如需把 Windows 组件存储的只读 DISM 分析加入报告（通常需管理员终端）：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -AnalyzeComponentStore
+& "$env:USERPROFILE\.codex\skills\c-drive-cleanup-skills\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -AnalyzeComponentStore -ElevateIfNeeded
 ```
 
 ## 测量脚本参数
@@ -97,9 +97,12 @@ git clone https://github.com/<your-name>/c-drive-cleanup-skills.git "$env:USERPR
 | `-MinimumLargeDirectoryGB` | `0.25` | 全面模式中列为“大目录”的最小大小（GB）。 |
 | `-IncludeTopLevel` | 关闭 | 兼容参数；在快速模式下额外统计顶层目录。 |
 | `-AnalyzeComponentStore` | 关闭 | 运行只读的 DISM 组件存储分析；可能需要管理员权限。 |
+| `-ElevateIfNeeded` | 关闭 | 当前会话不是管理员时发起 Windows UAC；获批准后使用独立管理员 PowerShell 扫描，并输出 JSON 报告。 |
 | `-JsonPath` | 空 | 写出 JSON 报告，便于清理前后对比。 |
 
-脚本仅在管理员会话中执行读取和统计，不会删除文件。全面模式单次遍历整个盘符下所有可访问的非重解析目录，输出最大的目录、文件和按风险分类的清理候选项，避免重复递归。它会跳过重解析点，并对无权限或锁定路径记录 `Errors`、最多 10 条 `ErrorSamples` 和 `SkippedReparsePoints`；因此报告是定位依据，可能低估受保护或被锁定路径的实际占用。
+脚本只执行读取和统计，不会删除文件。使用 `-ElevateIfNeeded` 且未指定 `-JsonPath` 时，会在当前用户的临时目录创建带时间戳与随机标识的 JSON 报告；原会话可读取该报告。全面模式单次遍历整个盘符下所有可访问的非重解析目录，输出最大的目录、文件和按风险分类的清理候选项，避免重复递归。它会跳过重解析点，并对无权限或锁定路径记录 `Errors`、最多 10 条 `ErrorSamples` 和 `SkippedReparsePoints`；因此报告是定位依据，可能低估受保护或被锁定路径的实际占用。
+
+扫描结论应逐行显示报告中的完整 `Path`（包括盘符），以及对应的占用、风险和建议。不要只显示“Chrome 用户数据”“临时文件”等汇总类别；同一类别包含多个目录时，必须列出每个实际路径。
 
 ## 清理分级
 
@@ -119,10 +122,15 @@ Get-ChildItem -Recurse
 Get-Content .\README.md
 ```
 
-如果要验证测量脚本语法：
+如果只验证测量脚本语法（不会执行扫描）：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\measure_c_drive.ps1 -Drive C: -ScanMode Quick -Top 5
+$tokens = $null
+$errors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile(
+  (Resolve-Path .\scripts\measure_c_drive.ps1), [ref]$tokens, [ref]$errors
+)
+if ($errors.Count) { $errors; exit 1 }
 ```
 
 注意：测量真实 C 盘可能耗时，尤其是使用 `-ScanMode Full` 时。`WinSxS` 可回收空间、系统还原点、已安装应用和 Docker/WSL 数据仍应通过对应官方工具进一步分析。

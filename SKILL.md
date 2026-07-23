@@ -14,33 +14,42 @@ description: "安全诊断和清理 Windows C 盘空间。用于分析 C: 整体
 
 ## 工作流
 
-1. 首次收到 C 盘诊断或清理请求时，先只回复：`皇上，请确认当前 Codex 或 PowerShell 会话已以管理员身份运行；确认后我将开始最大化全盘只读扫描。` 在用户明确确认前，不运行任何测量、DISM 或目录遍历命令。
-2. 用户确认后运行测量脚本。脚本会再次验证管理员身份；若验证失败，停止扫描并要求用户以管理员身份重新启动会话。
+1. 首次收到 C 盘诊断或清理请求时，先执行一次只读管理员权限预检。若未提升权限，使用 `-ElevateIfNeeded` 自动发起 Windows UAC；用户批准后由独立管理员 PowerShell 执行扫描并写出 JSON 报告。不得绕过、自动接受或伪造 UAC。用户拒绝或 UAC 无法启动时，停止后续测量、DISM 和目录遍历，并说明原因。
+2. 预检通过后运行测量脚本。脚本会再次验证管理员身份；若验证失败，停止扫描并要求用户以管理员身份重新启动会话。
 3. 确认目标盘。默认分析 `C:`；触及其他盘、云同步目录或用户数据前先询问。
 4. 用户请求整体分析、空间异常或快速模式无法解释占用时，运行全面模式；否则运行快速模式。
 5. 检查报告中的 `Errors` 与 `ErrorSamples`。访问受限或锁定路径会被跳过，因此目录统计可能低于已用空间。
 6. 对 `WinSxS` 使用 DISM，对已安装应用使用设置或卸载器，对 Docker/WSL/虚拟机使用产品专用命令；不要用目录大小替代这些工具的结论。
 7. 按风险和预计收益提出一次一个类别的操作；完成后重新测量并报告前后差异。
+8. 呈现扫描结论时，逐行保留报告的原始 `Path`，使用绝对路径；不得只给类别、目录名或相对路径。
 
 ## 只读测量
 
-仅在管理员 PowerShell 或管理员 Codex 会话中运行。脚本会拒绝非管理员会话。
+脚本可在管理员 PowerShell 或管理员 Codex 会话中直接运行。非管理员会话应加入 `-ElevateIfNeeded`：脚本会请求 Windows UAC，获批准后由独立管理员 PowerShell 执行扫描；原会话只读取生成的 JSON 报告。
 
 ```powershell
 # 快速：卷容量、常见清理项、系统根文件、浏览器和开发缓存
-& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick
+& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -ElevateIfNeeded
 
 # 全面：单次遍历全盘，列出最大的目录、文件和可安全清理候选项；可能耗时数分钟
-& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -Top 50 -MinimumLargeDirectoryGB 0.25 -MinimumLargeFileGB 1
+& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -Top 50 -MinimumLargeDirectoryGB 0.25 -MinimumLargeFileGB 1 -ElevateIfNeeded
 
 # 保留机器可读报告；父目录必须存在
-& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -JsonPath ".\c-drive-report.json"
+& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Full -ElevateIfNeeded -JsonPath ".\c-drive-report.json"
 
 # 组件存储的只读分析；通常需要管理员终端
-& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -AnalyzeComponentStore
+& ".\scripts\measure_c_drive.ps1" -Drive C: -ScanMode Quick -AnalyzeComponentStore -ElevateIfNeeded
 ```
 
 全面模式单次遍历所有可访问的非重解析目录，输出全盘最大的目录与文件，并按路径标记“安全但需批准”“先审查”“仅官方工具”。扫描器仅保留 Top N 结果，避免大盘扫描耗尽内存。它报告逻辑文件大小，不等同于物理磁盘分配；`Errors`、`ErrorSamples` 或 `SkippedReparsePoints` 非零时应说明漏计风险。
+
+## 报告呈现
+
+- 汇总前先读取扫描输出或 JSON 报告中的 `CleanupCandidates`、`LargeDirectories`、`LargeFiles`、`RootFiles` 字段；它们均包含 `Path`。
+- “主要可优化方向”使用表格时，表头必须包含“路径”，每一行均展示对应的完整 `Path`、占用、风险与建议。路径可使用行内代码，但不得省略盘符或以 `...` 截断。
+- 不得把多个目录合并成只有“企业微信数据”“Chrome 用户数据”等类别名的一行；若需要归类，仍须在该类别下逐行列出每个实际路径及其大小。
+- “仅官方工具处理”“避免手动处理”和大文件清单同样必须展示完整绝对路径，例如 `C:\pagefile.sys`，不能只显示文件名。
+- 仅在报告未提供路径、或路径因访问错误无法取得时，明确写明“路径未取得”及原因；不要猜测或编造路径。
 
 ## 官方分析
 

@@ -11,6 +11,8 @@ param(
     [double]$MinimumLargeDirectoryGB = 0.25,
     [switch]$IncludeTopLevel,
     [switch]$AnalyzeComponentStore,
+    [switch]$ElevateIfNeeded,
+    [switch]$LibraryMode,
     [string]$JsonPath
 )
 
@@ -21,10 +23,6 @@ function Test-IsAdministrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-if (-not (Test-IsAdministrator)) {
-    throw "Administrator privileges are required. Relaunch Codex or PowerShell as Administrator, then run the scan again."
 }
 
 function Convert-Bytes {
@@ -41,12 +39,13 @@ function Get-DirectoryMeasurement {
 
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -eq $item -or -not $item.PSIsContainer) {
-        return [pscustomobject]@{ Path = $Path; Exists = $false; Bytes = 0L; Size = "0 B"; Files = 0L; Errors = 0L; ErrorSamples = @() }
+        return [pscustomobject]@{ Path = $Path; Exists = $false; Bytes = 0L; Size = "0 B"; Files = 0L; Errors = 0L; SkippedReparsePoints = 0L; ErrorSamples = @() }
     }
 
     $total = 0L
     $files = 0L
     $errors = 0L
+    $skippedReparsePoints = 0L
     $errorSamples = [System.Collections.Generic.List[string]]::new()
     $pending = [System.Collections.Generic.Stack[string]]::new()
     $pending.Push($item.FullName)
@@ -62,7 +61,11 @@ function Get-DirectoryMeasurement {
             foreach ($directoryPath in [System.IO.Directory]::EnumerateDirectories($current)) {
                 try {
                     $attributes = [System.IO.File]::GetAttributes($directoryPath)
-                    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) { $pending.Push($directoryPath) }
+                    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) {
+                        $pending.Push($directoryPath)
+                    } else {
+                        $skippedReparsePoints += 1
+                    }
                 } catch { $errors += 1; if ($errorSamples.Count -lt 5) { $errorSamples.Add(("{0}: {1}" -f $directoryPath, $_.Exception.Message)) } }
             }
         } catch {
@@ -77,6 +80,7 @@ function Get-DirectoryMeasurement {
         Size = Convert-Bytes $total
         Files = $files
         Errors = $errors
+        SkippedReparsePoints = $skippedReparsePoints
         ErrorSamples = @($errorSamples)
     }
 }
@@ -98,7 +102,7 @@ function Add-DirectoryCandidate {
     if (-not $size.Exists) { return }
     $List.Add([pscustomobject]@{
         Category = $Category; Path = $size.Path; Bytes = $size.Bytes; Size = $size.Size
-        Files = $size.Files; Errors = $size.Errors; Risk = $Risk; Note = $Note
+        Files = $size.Files; Errors = $size.Errors; SkippedReparsePoints = $size.SkippedReparsePoints; Risk = $Risk; Note = $Note
         ErrorSamples = $size.ErrorSamples
     }) | Out-Null
 }
@@ -108,7 +112,7 @@ function Get-RecycleBinMeasurement {
     $size = Get-DirectoryMeasurement -Path (Join-Path $Root '$Recycle.Bin')
     [pscustomobject]@{
         Category = "Recycle Bin"; Path = $size.Path; Bytes = $size.Bytes; Size = $size.Size; Risk = "safe-with-approval"
-        Errors = $size.Errors; ErrorSamples = $size.ErrorSamples
+        Errors = $size.Errors; SkippedReparsePoints = $size.SkippedReparsePoints; ErrorSamples = $size.ErrorSamples
     }
 }
 
@@ -127,7 +131,7 @@ function Add-TopRecord {
 
 function Get-PathClassification {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Root)
-    $normalized = $Path.TrimEnd('\\').ToLowerInvariant()
+    $normalized = $Path.TrimEnd('\').ToLowerInvariant()
     $windowsTemp = (Join-Path $Root 'Windows\Temp').ToLowerInvariant()
     $updateDownloads = (Join-Path $Root 'Windows\SoftwareDistribution\Download').ToLowerInvariant()
     $deliveryCache = (Join-Path $Root 'Windows\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache').ToLowerInvariant()
@@ -161,10 +165,45 @@ function Get-PathClassification {
     if ($normalized -match "\\(docker|virtualbox vms|\.gradle\\caches|\.m2\\repository|\.nuget\\packages|npm-cache|pip\\cache)$") {
         return [pscustomobject]@{ Category = "Development or virtualized data"; Risk = "review-first"; Note = "Use the owning product's cleanup command after reviewing active projects and data." }
     }
-    if ($normalized.StartsWith($windowsRoot) -or $normalized.StartsWith($programFilesRoot) -or $normalized.StartsWith($programDataRoot)) {
+    if ((Test-PathIsEqualOrDescendant -Path $normalized -Root $windowsRoot) -or
+        (Test-PathIsEqualOrDescendant -Path $normalized -Root $programFilesRoot) -or
+        (Test-PathIsEqualOrDescendant -Path $normalized -Root $programDataRoot)) {
         return [pscustomobject]@{ Category = "System or application data"; Risk = "official-tool-only"; Note = "Do not delete manually; use Windows, the application, or its uninstaller." }
     }
     return [pscustomobject]@{ Category = "Unclassified"; Risk = "review-first"; Note = "Inspect the owning application and contents before acting." }
+}
+
+function New-ElevatedReportPath {
+    $fileName = "c-drive-report-{0}-{1}.json" -f (Get-Date -Format "yyyyMMdd-HHmmss"), [guid]::NewGuid().ToString("N")
+    return Join-Path ([IO.Path]::GetTempPath()) $fileName
+}
+
+function Resolve-ReportPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([IO.Path]::IsPathFullyQualified($Path)) { return $Path }
+    return Join-Path (Get-Location).Path $Path
+}
+
+function Get-ElevatedScanArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][string]$ReportPath
+    )
+
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    foreach ($argument in @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $ScriptPath), "-Drive", $Drive, "-ScanMode", $ScanMode, "-Top", $Top, "-MinimumLargeFileGB", $MinimumLargeFileGB, "-MinimumLargeDirectoryGB", $MinimumLargeDirectoryGB, "-JsonPath", ('"{0}"' -f $ReportPath))) {
+        $arguments.Add([string]$argument)
+    }
+    if ($IncludeTopLevel) { $arguments.Add("-IncludeTopLevel") }
+    if ($AnalyzeComponentStore) { $arguments.Add("-AnalyzeComponentStore") }
+    return $arguments.ToArray()
+}
+
+function Test-PathIsEqualOrDescendant {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Root)
+    $normalizedPath = $Path.TrimEnd('\').ToLowerInvariant()
+    $normalizedRoot = $Root.TrimEnd('\').ToLowerInvariant()
+    return $normalizedPath -eq $normalizedRoot -or $normalizedPath.StartsWith($normalizedRoot + '\')
 }
 
 function Get-FullDriveInventory {
@@ -269,6 +308,37 @@ function Get-ComponentStoreAnalysis {
     }
 }
 
+if ($LibraryMode) {
+    return
+}
+
+if (-not (Test-IsAdministrator)) {
+    if ($ElevateIfNeeded) {
+        $resolvedReportPath = if ($JsonPath) { Resolve-ReportPath -Path $JsonPath } else { New-ElevatedReportPath }
+        $reportParent = Split-Path -Parent $resolvedReportPath
+        if (-not (Test-Path -LiteralPath $reportParent -PathType Container)) {
+            throw "JsonPath parent directory does not exist: $reportParent"
+        }
+
+        $powershellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+        $childArguments = Get-ElevatedScanArguments -ScriptPath $PSCommandPath -ReportPath $resolvedReportPath
+        try {
+            $child = Start-Process -FilePath $powershellPath -Verb RunAs -ArgumentList $childArguments -Wait -PassThru
+        } catch {
+            throw "Administrator elevation was not approved or could not be started: $($_.Exception.Message)"
+        }
+        if ($child.ExitCode -ne 0) {
+            throw "The elevated scan failed with exit code $($child.ExitCode)."
+        }
+        if (-not (Test-Path -LiteralPath $resolvedReportPath -PathType Leaf)) {
+            throw "The elevated scan completed without producing its JSON report: $resolvedReportPath"
+        }
+        "Elevated scan completed. JSON report written to $resolvedReportPath"
+        return
+    }
+    throw "Administrator privileges are required. Relaunch Codex or PowerShell as Administrator, then run the scan again."
+}
+
 $driveName = $Drive.Substring(0, 1).ToUpperInvariant()
 $root = "$driveName`:\"
 $psDrive = Get-PSDrive -Name $driveName -ErrorAction Stop
@@ -361,10 +431,10 @@ if ($JsonPath) {
 }
 
 ""; "Volume"; $volume | Format-List Drive, Root, Used, Free, Total, FreePercent | Out-String | Write-Output
-"Cleanup candidates (read-only estimates)"; $report.CleanupCandidates | Format-Table Category, Size, Risk, Note, Errors, Path -AutoSize | Out-String | Write-Output
+"Cleanup candidates (read-only estimates)"; $report.CleanupCandidates | Format-Table Category, Size, Risk, Note, Errors, SkippedReparsePoints, Path -AutoSize | Out-String | Write-Output
 "Root files (official tools only)"; $report.RootFiles | Format-Table Size, Path -AutoSize | Out-String | Write-Output
-"Recycle Bin"; $report.RecycleBin | Format-Table Size, Risk, Errors, Path -AutoSize | Out-String | Write-Output
-if ($report.TopLevelDirectories.Count) { "Top-level directories"; $report.TopLevelDirectories | Format-Table Size, Files, Errors, Path -AutoSize | Out-String | Write-Output }
+"Recycle Bin"; $report.RecycleBin | Format-Table Size, Risk, Errors, SkippedReparsePoints, Path -AutoSize | Out-String | Write-Output
+if ($report.TopLevelDirectories.Count) { "Top-level directories"; $report.TopLevelDirectories | Format-Table Size, Files, Errors, SkippedReparsePoints, Path -AutoSize | Out-String | Write-Output }
 if ($report.LargeDirectories.Count) { "Largest directories across the drive"; $report.LargeDirectories | Format-Table Size, Category, Risk, Errors, Path -AutoSize | Out-String | Write-Output }
 if ($report.LargeFiles.Count) { "Largest files across the drive"; $report.LargeFiles | Format-Table Size, Category, Risk, Path -AutoSize | Out-String | Write-Output }
 if ($report.ComponentStore) { "Component Store Analysis"; $report.ComponentStore | Format-List Status, ExitCode, Output | Out-String | Write-Output }
